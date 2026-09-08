@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<title>Deriv AI Scanner</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon.svg">
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Arial,sans-serif;color:#eef2ff;background:#070b14}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#0b1220,#070b14);min-height:100vh}
+main{max-width:760px;margin:auto;padding:22px 16px 40px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+h1{font-size:25px;margin:0}.sub{color:#94a3b8;font-size:13px;margin-top:4px}
+.badge{padding:7px 10px;border-radius:999px;background:#123b2a;color:#65f0a5;font-size:12px}
+.card{background:#101827;border:1px solid #1f2a3d;border-radius:18px;padding:16px;margin:12px 0;box-shadow:0 8px 30px #0003}
+.hero{border-color:#245a45}.label{font-size:11px;letter-spacing:1px;color:#94a3b8;text-transform:uppercase}
+.market{font-size:23px;font-weight:750;margin:5px 0}.contract{font-size:17px;color:#a7f3d0}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px}
+.metric{background:#0b1220;border-radius:12px;padding:11px}.metric b{display:block;font-size:18px;margin-top:4px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 6px;border-bottom:1px solid #202b3d;font-size:13px}
+.green{color:#6ee7b7}.yellow{color:#fde68a}.red{color:#fca5a5}
+button{width:100%;border:0;border-radius:12px;padding:13px;background:#2563eb;color:white;font-weight:700;font-size:15px}
+small{color:#94a3b8;line-height:1.5}
+</style>
+</head>
+<body>
+<main>
+<header><div><h1>Deriv AI Scanner</h1><div class="sub">Opportunity scanner • scan-only mode</div></div><div class="badge" id="status">DEMO</div></header>
+
+<section class="card hero">
+<div class="label">Best opportunity</div>
+<div class="market" id="bestMarket">Scanning…</div>
+<div class="contract" id="bestContract">Waiting for live market data</div>
+<div class="grid">
+<div class="metric"><span class="label">AI score</span><b id="bestScore">—</b></div>
+<div class="metric"><span class="label">Observed probability</span><b id="bestProb">—</b></div>
+<div class="metric"><span class="label">Sample</span><b id="bestSample">—</b></div>
+<div class="metric"><span class="label">EV check</span><b id="bestEV">—</b></div>
+</div>
+</section>
+
+<section class="card">
+<div class="label">Money opportunity filter</div>
+<p id="opportunity">The scanner ranks markets using observed digit frequencies. A trade is only considered interesting when probability, payout and risk can be evaluated together.</p>
+</section>
+
+<section class="card">
+<div class="label">Markets</div>
+<table><thead><tr><th>Market</th><th>Contract</th><th>Score</th><th>Status</th></tr></thead>
+<tbody id="rows"><tr><td colspan="4">Connecting…</td></tr></tbody></table>
+</section>
+
+<section class="card">
+<button id="scan">Scan now</button>
+<p><small>Important: this version does not place trades. It uses public Deriv market data. Do not enter your Deriv password or API token here.</small></p>
+</section>
+</main>
+<script>
+const WS="wss://api.derivws.com/trading/v1/options/ws/public";
+const state={symbols:[],ticks:{}};
+
+function digit(q){const s=String(q);const d=s.replace(/\D/g,"");return d?Number(d[d.length-1]):null}
+function analyze(arr){
+  const ds=arr.map(digit).filter(x=>x!==null).slice(-200);
+  if(ds.length<50)return null;
+  const odd=ds.filter(x=>x%2).length/ds.length;
+  const even=1-odd;
+  const counts=Array(10).fill(0); ds.forEach(x=>counts[x]++);
+  let best=0;for(let i=1;i<10;i++)if(counts[i]>counts[best])best=i;
+  const match=counts[best]/ds.length, diff=1-match;
+  const opts=[
+    ["EVEN",even],["ODD",odd],[`MATCH ${best}`,match],[`DIFFERS ${best}`,diff]
+  ].sort((a,b)=>b[1]-a[1]);
+  const [contract,p]=opts[0];
+  const edge=Math.abs(p-.5);
+  const score=Math.min(99,p*100 + edge*35);
+  return {contract,p,score,sample:ds.length};
+}
+function render(results){
+  results.sort((a,b)=>b.score-a.score);
+  const b=results[0];
+  if(!b)return;
+  document.getElementById("bestMarket").textContent=b.name+" ("+b.symbol+")";
+  document.getElementById("bestContract").textContent=b.contract;
+  document.getElementById("bestScore").textContent=b.score.toFixed(1)+"%";
+  document.getElementById("bestProb").textContent=(b.p*100).toFixed(1)+"%";
+  document.getElementById("bestSample").textContent=b.sample;
+  document.getElementById("bestEV").textContent="Needs payout";
+  document.getElementById("opportunity").textContent=
+    "Top observed setup: "+b.contract+" on "+b.name+". This is a statistical signal, not a guaranteed prediction. Payout must be checked before any real trade.";
+  document.getElementById("rows").innerHTML=results.slice(0,10).map(r=>{
+    const c=r.score>=65?"green":r.score>=57?"yellow":"red";
+    return `<tr><td>${r.name}</td><td>${r.contract}</td><td>${r.score.toFixed(1)}%</td><td class="${c}">${r.score>=65?"WATCH":r.score>=57?"WEAK":"SKIP"}</td></tr>`;
+  }).join("");
+}
+async function scan(){
+ const ws=new WebSocket(WS);
+ document.getElementById("status").textContent="SCANNING";
+ const req=(x)=>ws.send(JSON.stringify(x));
+ ws.onopen=()=>req({active_symbols:"brief",req_id:1});
+ ws.onmessage=(e)=>{
+  const m=JSON.parse(e.data);
+  if(m.msg_type==="active_symbols"){
+    state.symbols=m.active_symbols.filter(s=>{
+      const t=((s.underlying_symbol||"")+" "+(s.underlying_symbol_name||"")+" "+(s.underlying_symbol_type||"")+" "+(s.market||"")).toLowerCase();
+      return /volatility|synthetic|jump|boom|crash|range break/.test(t);
+    }).slice(0,18);
+    state.symbols.forEach((s,i)=>{
+      state.ticks[s.underlying_symbol]=[];
+      req({ticks_history:s.underlying_symbol,end:"latest",count:250,style:"ticks",req_id:100+i});
+    });
+  }
+  if(m.msg_type==="history"){
+    const sym=m.echo_req?.ticks_history;
+    if(sym && m.history?.prices){state.ticks[sym]=m.history.prices;update();}
+  }
+  if(m.msg_type==="tick"){
+    const sym=m.tick?.symbol,q=m.tick?.quote;
+    if(sym && q!==undefined){state.ticks[sym]=(state.ticks[sym]||[]).concat(q).slice(-300);update();}
+  }
+ };
+ ws.onerror=()=>{document.getElementById("status").textContent="ERROR"};
+}
+function update(){
+ const out=[];
+ state.symbols.forEach(s=>{const sym=s.underlying_symbol,a=analyze(state.ticks[sym]||[]);if(a)out.push({...a,symbol:sym,name:s.underlying_symbol_name||sym})});
+ if(out.length)render(out);
+}
+document.getElementById("scan").onclick=scan;
+scan();
+</script>
+</body>
+</html>
